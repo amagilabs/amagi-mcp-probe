@@ -395,7 +395,7 @@ class Prober:
                 total += _ms(start)
                 hint = ""
                 if exc.code == -32602:
-                    hint = " (the arguments match the published inputSchema, so the schema and the handler disagree)"
+                    hint = " (args match inputSchema: schema and handler disagree)"
                 self.rec.add(tr.findings, "call-rpc-error", f"{exc}{hint}", tr.name)
                 continue
             except TransportError as exc:
