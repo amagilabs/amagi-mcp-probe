@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import math
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:  # Python 3.11+
     import re._parser as sre_parse  # type: ignore[import-not-found]
@@ -222,7 +222,12 @@ class _Generator:
                     sub = extra if isinstance(extra, dict) else {}
             out[name] = self.value(sub, depth + 1)
         filler = 0
+        pattern_keys = _pattern_keys(schema)
         while isinstance(min_props, int) and len(out) < min_props:
+            key = _fresh_key(schema, pattern_keys, out)
+            if key is not None:
+                out[key[0]] = self.value(key[1], depth + 1)
+                continue
             if extra is False:
                 raise Unsatisfiable("minProperties cannot be met")
             key = f"key{filler}"
@@ -327,6 +332,29 @@ def _pattern_property(schema: Dict[str, Any], name: str) -> Any:
     return None
 
 
+def _pattern_keys(schema: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """A sample property name for each patternProperties regex."""
+    pp = schema.get("patternProperties")
+    out: List[Tuple[str, Any]] = []
+    if isinstance(pp, dict):
+        for pattern, sub in pp.items():
+            key = _from_regex(pattern, 1)
+            if key is not None and _pattern_property(schema, key) is sub:
+                out.append((key, sub))
+    return out
+
+
+def _fresh_key(schema: Dict[str, Any], pattern_keys: List[Tuple[str, Any]],
+               taken: Dict[str, Any]) -> Optional[Tuple[str, Any]]:
+    """An unused property name that still matches its patternProperties regex."""
+    for base, sub in pattern_keys:
+        for n in range(len(taken) + 2):
+            for key in ((base,) if n == 0 else (f"{base}{n}", base + "x" * n)):
+                if key not in taken and _pattern_property(schema, key) is sub:
+                    return key, sub
+    return None
+
+
 def _vary(item: Any, i: int) -> Any:
     if isinstance(item, str):
         return f"{item}{i}"
@@ -345,18 +373,20 @@ def _string(schema: Dict[str, Any]) -> str:
     pattern = schema.get("pattern") if isinstance(schema.get("pattern"), str) else None
     fmt = schema.get("format")
 
-    candidates: List[str] = []
+    # (candidate, keep): a format sample is never padded or cut; anything else may be,
+    # and the pattern check below throws out a padded string that no longer matches.
+    candidates: List[Tuple[str, bool]] = []
     if isinstance(fmt, str) and fmt in FORMAT_SAMPLES:
-        candidates.append(FORMAT_SAMPLES[fmt])
+        candidates.append((FORMAT_SAMPLES[fmt], True))
     if pattern:
         for target in (min_len, max(min_len, 1)):
             built = _from_regex(pattern, target)
             if built is not None:
-                candidates.append(built)
-    candidates += STRING_CANDIDATES
+                candidates.append((built, False))
+    candidates += [(c, False) for c in STRING_CANDIDATES]
 
-    for cand in candidates:
-        cand = _fit_length(cand, min_len, max_len, keep=bool(pattern) or bool(fmt))
+    for cand, keep in candidates:
+        cand = _fit_length(cand, min_len, max_len, keep=keep)
         if cand is None:
             continue
         if pattern and not _matches(pattern, cand):

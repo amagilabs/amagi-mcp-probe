@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-import warnings
+import urllib.parse
 from typing import Any, Iterator, List, Optional, Tuple
 
 from jsonschema import Draft202012Validator
@@ -15,13 +15,13 @@ DEFAULT_VALIDATOR = Draft202012Validator
 
 def validator_class(schema: Any) -> Tuple[Any, Optional[str]]:
     """Return (validator class, warning) for a schema, honouring its $schema."""
+    cls = validator_for(schema, default=None)
+    if cls is not None:
+        return cls, None
     note = None
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        cls = validator_for(schema, default=DEFAULT_VALIDATOR)
-    if caught and isinstance(schema, dict) and "$schema" in schema:
+    if isinstance(schema, dict) and isinstance(schema.get("$schema"), str):
         note = f"unknown $schema {schema['$schema']!r}; checked as JSON Schema 2020-12"
-    return cls, note
+    return DEFAULT_VALIDATOR, note
 
 
 def make_validator(schema: Any):
@@ -51,6 +51,12 @@ def schema_problems(schema: Any) -> Tuple[List[str], List[str]]:
             # JSON Schema regexes are ECMA-262; Python's re rejects a few valid ones (\p{L}, ...).
             notes.append(f"{where or '(root)'}: regex {pattern!r} does not compile in Python ({exc}); "
                          "check it is valid ECMA-262")
+    for where, ref in _refs(schema, ""):
+        problem = _local_ref_problem(schema, ref)
+        if problem:
+            errors.append(f"{where or '(root)'}: $ref {ref!r} {problem}")
+    if errors:
+        return errors, notes
     # A metaschema-valid schema can still break at validation time (bad $ref, bad regex).
     try:
         validator = cls(schema)
@@ -78,3 +84,43 @@ def _patterns(node: Any, where: str) -> Iterator[Tuple[str, str]]:
     elif isinstance(node, list):
         for i, val in enumerate(node):
             yield from _patterns(val, f"{where}/{i}".lstrip("/"))
+
+
+def _refs(node: Any, where: str) -> Iterator[Tuple[str, str]]:
+    """Yield (location, ref) for every $ref in a schema."""
+    if isinstance(node, dict):
+        if isinstance(node.get("$ref"), str):
+            yield where, node["$ref"]
+        for key, val in node.items():
+            if key in ("const", "enum", "default", "examples"):
+                continue
+            yield from _refs(val, f"{where}/{key}".lstrip("/"))
+    elif isinstance(node, list):
+        for i, val in enumerate(node):
+            yield from _refs(val, f"{where}/{i}".lstrip("/"))
+
+
+def _has_nested_id(node: Any, top: bool = True) -> bool:
+    if isinstance(node, dict):
+        if not top and ("$id" in node or "id" in node and isinstance(node.get("id"), str)):
+            return True
+        return any(_has_nested_id(v, False) for k, v in node.items() if k not in ("const", "enum", "default", "examples"))
+    if isinstance(node, list):
+        return any(_has_nested_id(v, False) for v in node)
+    return False
+
+
+def _local_ref_problem(root: Any, ref: str) -> Optional[str]:
+    """Why a local JSON-pointer $ref ("#/...") does not resolve, or None. Other refs are not checked."""
+    if not ref.startswith("#/") or _has_nested_id(root):
+        return None
+    node = root
+    for part in ref[2:].split("/"):
+        part = urllib.parse.unquote(part).replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return "points at nothing"
+    return None

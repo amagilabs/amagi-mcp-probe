@@ -285,14 +285,14 @@ class Prober:
     def _call_all(self, tools: List[Dict[str, Any]]) -> None:
         stopped = False
         for tool, tr in zip(tools, self.result.tools):
-            if stopped:
-                tr.status = "not-run"
-                tr.skip_reason = "server could not be restarted"
-                continue
             reason = self._skip_reason(tool, tr)
             if reason:
                 tr.status = "skip"
                 tr.skip_reason = reason
+                continue
+            if stopped:
+                tr.status = "not-run"
+                tr.skip_reason = "server could not be restarted"
                 continue
             ok = self._call_one(tool, tr)
             if not ok:
