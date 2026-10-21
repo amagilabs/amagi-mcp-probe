@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from amagi_mcp_probe import __version__
-from amagi_mcp_probe.cli import main
+from amagi_mcp_probe.cli import main, server_label
 from amagi_mcp_probe.config import ConfigError, expand, load_args, load_servers
 
 
@@ -136,6 +136,20 @@ def test_module_entry_point_and_version():
     out = subprocess.run([sys.executable, "-m", "amagi_mcp_probe", "--version"],
                          capture_output=True, text=True, check=True)
     assert out.stdout.strip() == f"amagi-mcp-probe {__version__}"
+
+
+@pytest.mark.parametrize("command, label", [
+    (["python", "examples/servers/buggy_server.py"], "buggy_server.py"),
+    (["npx", "-y", "@modelcontextprotocol/server-everything"], "server-everything"),
+    (["node", "/x/node_modules/@modelcontextprotocol/server-everything/dist/index.js", "stdio"],
+     "server-everything"),
+    (["uv", "run", "server.py"], "server.py"),
+    (["python", "-m", "my_mcp"], "my_mcp"),
+    (["my-server"], "my-server"),
+    ([r"C:\tools\srv.exe", "--port", "1"], "srv.exe"),
+])
+def test_server_label(command, label):
+    assert server_label(command) == label
 
 
 # config ---------------------------------------------------------------------

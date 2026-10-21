@@ -80,7 +80,9 @@ def make_handler(state):
             if state.mode == "sse":
                 note = json.dumps({"jsonrpc": "2.0", "method": "notifications/message",
                                    "params": {"level": "info", "data": "working"}})
-                body = f": keepalive\n\nevent: message\ndata: {note}\n\ndata: {json.dumps(reply)}\n\n"
+                # priming event (id + empty data), a comment, a notification, then the response
+                body = (f"id: 0\ndata: \n\n: keepalive\n\nevent: message\ndata: {note}\n\n"
+                        f"id: 1\ndata: {json.dumps(reply)}\n\n")
                 self._send(200, body, "text/event-stream", extra)
             else:
                 self._send(200, json.dumps(reply), "application/json", extra)

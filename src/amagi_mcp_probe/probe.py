@@ -23,7 +23,7 @@ MAX_PAGES = 100
 
 @dataclass
 class Options:
-    timeout: float = 10.0
+    timeout: float = 30.0
     startup_timeout: float = 30.0
     only: List[str] = field(default_factory=list)
     skip: List[str] = field(default_factory=list)
@@ -180,8 +180,7 @@ class Prober:
             loose = [line for line in self._noise_seen if line not in self._noise_blamed]
             if loose:
                 self.rec.add(self.result.findings, "stdout-noise",
-                             f"{len(loose)} line(s) on stdout were not JSON-RPC; log to stderr instead",
-                             detail=loose[:5])
+                             f"{len(loose)} {self._noise_where()} were not JSON-RPC", detail=loose[:5])
             self.result.stderr_tail = self._stderr_seen[-20:]
             for tr in self.result.tools:
                 tr.finalize()
@@ -391,8 +390,13 @@ class Prober:
         if new:
             self._noise_blamed.extend(new)
             self.rec.add(tr.findings, "stdout-noise",
-                         f"wrote {len(new)} non-JSON-RPC line(s) to stdout while running; log to stderr instead",
+                         f"{len(new)} {self._noise_where()} were not JSON-RPC while this tool ran",
                          tr.name, detail=new[:3])
+
+    def _noise_where(self) -> str:
+        if self.result.transport == "http":
+            return "event-stream message(s)"
+        return "line(s) on stdout (log to stderr instead)"
 
     def _recover_after_timeout(self, name: str) -> bool:
         t = self.transport

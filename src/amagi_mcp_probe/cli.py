@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import re
 import sys
 from typing import List, Optional
 
@@ -48,8 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="environment variable for the server process (repeatable)")
     src.add_argument("--cwd", metavar="DIR", help="working directory for the server process")
     run = p.add_argument_group("what to run")
-    run.add_argument("--timeout", type=float, default=10.0, metavar="SEC",
-                     help="seconds to wait for each tools/list and tools/call (default 10)")
+    run.add_argument("--timeout", type=float, default=30.0, metavar="SEC",
+                     help="seconds to wait for each tools/list and tools/call (default 30)")
     run.add_argument("--startup-timeout", type=float, default=30.0, metavar="SEC",
                      help="seconds to wait for the initialize handshake (default 30)")
     run.add_argument("--only", action="append", default=[], metavar="GLOB", help="call only matching tools")
@@ -84,6 +85,29 @@ def _split(argv: List[str]):
     return argv, []
 
 
+_LAUNCHERS = {"npx", "uvx", "uv", "node", "bun", "bunx", "deno", "pipx", "pnpm", "yarn", "docker", "py", "java"}
+_SUBCOMMANDS = {"run", "x", "exec", "tool", "dlx"}
+_GENERIC = {"index", "main", "__main__", "server", "cli", "app"}
+_BUILD_DIRS = {"dist", "build", "src", "lib", "bin", "out"}
+
+
+def server_label(command: List[str]) -> str:
+    """A short name for a server command: the script or package it runs."""
+    exe = os.path.splitext(re.split(r"[\\/]", command[0])[-1])[0].lower()
+    target = command[0]
+    if exe in _LAUNCHERS or exe.startswith("python"):
+        target = next((a for a in command[1:] if not a.startswith("-") and a not in _SUBCOMMANDS), command[0])
+    parts = [p for p in re.split(r"[\\/]", target) if p]
+    if not parts:
+        return "server"
+    name = parts[-1]
+    if os.path.splitext(name)[0] in _GENERIC:
+        for parent in reversed(parts[:-1]):
+            if parent not in _BUILD_DIRS:
+                return parent
+    return name
+
+
 def _usage(parser: argparse.ArgumentParser, msg: str) -> int:
     parser.print_usage(sys.stderr)
     print(f"amagi-mcp-probe: error: {msg}", file=sys.stderr)
@@ -109,8 +133,7 @@ def _specs(args, command: List[str], parser) -> List[ServerSpec]:
         k, v = item.split(":", 1)
         headers[k.strip()] = v.strip()
     if command:
-        name = os.path.basename(command[-1]) if len(command) > 1 else os.path.basename(command[0])
-        return [ServerSpec(name=name or "server", kind="stdio", command=command, env=env, cwd=args.cwd)]
+        return [ServerSpec(name=server_label(command), kind="stdio", command=command, env=env, cwd=args.cwd)]
     if args.url:
         return [ServerSpec(name="server", kind="http", url=args.url, headers=headers)]
     specs = load_servers(args.config)

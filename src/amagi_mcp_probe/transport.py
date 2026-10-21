@@ -369,6 +369,8 @@ class HttpTransport(Transport):
         try:
             if "text/event-stream" in ctype:
                 for data in _sse_events(resp, deadline):
+                    if not data.strip():
+                        continue  # a priming event (id, empty data) lets the client resume; not a message
                     try:
                         m = json.loads(data)
                     except ValueError:
