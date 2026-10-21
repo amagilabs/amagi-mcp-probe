@@ -203,3 +203,12 @@ def test_load_args(tmp_path):
     bad.write_text(json.dumps({"t": 5}), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_args(str(bad))
+
+
+def test_args_file_list_calls_each_entry(capsys, tmp_path, notes_cmd):
+    args = tmp_path / "args.json"
+    args.write_text(json.dumps({"get_note": [{"id": "note-001"}, {"id": "nope"}]}), encoding="utf-8")
+    rc, out, _ = cli(capsys, "--only", "get_note", "--args", str(args), "--", *notes_cmd)
+    assert rc == 0
+    assert "args-override-invalid: --args (call 2) does not match inputSchema" in out
+    assert "tool-error: isError: true: no note with id nope" in out
