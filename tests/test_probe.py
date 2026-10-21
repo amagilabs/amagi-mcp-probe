@@ -1,8 +1,10 @@
 """End-to-end probe runs against real stdio server processes."""
 
+import os
+
 from conftest import fixture_cmd
 
-from amagi_mcp_probe.probe import Options, Prober
+from amagi_mcp_probe.probe import Options, Prober, shorten_paths
 from amagi_mcp_probe.transport import StdioTransport
 
 
@@ -162,3 +164,18 @@ def test_protocol_version_is_negotiated(notes_cmd):
     assert r.protocol_version == "2025-06-18"
     assert r.findings == []
 
+
+
+def test_shorten_paths():
+    base = os.path.join(os.path.abspath(os.sep), "work", "proj")
+    line = '  File "' + os.path.join(base, "srv", "main.py") + '", line 3'
+    assert shorten_paths([line], [base]) == ['  File "' + os.path.join("srv", "main.py") + '", line 3']
+    assert shorten_paths([base.replace(os.sep, "/") + "/a.py"], [base]) == ["a.py"]
+    assert shorten_paths(["/etc/x"], [os.path.abspath(os.sep)]) == ["/etc/x"]  # a bare root is never stripped
+
+
+def test_crash_detail_has_no_absolute_paths(buggy_cmd):
+    r = run(buggy_cmd, timeout=1.5, only=["resize_image"])
+    detail = next(t for t in r.tools if t.name == "resize_image").findings[0].detail
+    assert any("buggy_server.py" in line for line in detail)
+    assert not any(os.getcwd().lower() in line.lower() for line in detail)

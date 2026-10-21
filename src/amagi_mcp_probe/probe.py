@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,30 @@ KNOWN_PROTOCOLS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 CONTENT_TYPES = {"text", "image", "audio", "resource_link", "resource"}
 MAX_PAGES = 100
+
+
+def _bases(t: Transport) -> List[str]:
+    """Folders whose paths in stderr are printed relative: the server's cwd, then ours."""
+    cwd = getattr(t, "cwd", None)
+    return ([os.path.abspath(cwd)] if cwd else []) + [os.getcwd()]
+
+
+def shorten_paths(lines: List[str], bases: List[str]) -> List[str]:
+    """Print paths under the working directory as relative paths, so reports do not leak local folders."""
+    patterns = []
+    for base in bases:
+        base = base.rstrip("\\/")
+        if len(base) < 3:  # never strip a bare drive or root
+            continue
+        # match the folder with either slash style, followed by a separator
+        parts = [re.escape(p) for p in re.split(r"[\\/]", base)]
+        patterns.append(re.compile(r"[\\/]".join(parts) + r"[\\/]", re.IGNORECASE if os.name == "nt" else 0))
+    out = []
+    for line in lines:
+        for pattern in patterns:
+            line = pattern.sub("", line)
+        out.append(line)
+    return out
 
 
 @dataclass
@@ -132,7 +157,7 @@ class Prober:
 
     def _stderr(self, t: Transport) -> List[str]:
         """The last few stderr lines: for a Python traceback, that is the exception itself."""
-        return [line for line in t.stderr_tail(40) if line.strip()][-8:]
+        return shorten_paths([line for line in t.stderr_tail(40) if line.strip()][-8:], _bases(t))
 
     def _harvest(self) -> None:
         """Keep stdout noise and stderr from a session before it is replaced."""
@@ -142,7 +167,7 @@ class Prober:
         for line in t.noise:
             if line not in self._noise_seen:
                 self._noise_seen.append(line)
-        self._stderr_seen = t.stderr_tail(30) or self._stderr_seen
+        self._stderr_seen = shorten_paths(t.stderr_tail(30), _bases(t)) or self._stderr_seen
 
     def _close(self) -> None:
         if self.transport is not None:
