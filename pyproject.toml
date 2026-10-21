@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amagi-mcp-probe"
+version = "0.1.0"
+description = "Headless smoke test for MCP servers: starts the server, checks every tool schema, calls every tool with generated arguments, and fails CI on crashes, hangs and schema violations."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "AmagiLabs (Amagisolutionsgroup, Inc.)", email = "dev@amagisolutionsgroup.com" }]
+requires-python = ">=3.9"
+dependencies = [
+    "jsonschema>=4.18",
+]
+keywords = ["mcp", "model-context-protocol", "testing", "smoke-test", "ci", "github-actions", "json-schema", "claude"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/amagilabs/amagi-mcp-probe"
+
+[project.scripts]
+amagi-mcp-probe = "amagi_mcp_probe.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
