@@ -193,7 +193,7 @@ A star helps other people find it.
 
 - [amagilabs](https://github.com/amagilabs): other small open source dev tools from the same lab.
 - [amagi-watch](https://github.com/amagilabs/amagi-watch): turn a video URL into a Claude-readable transcript and frame index.
-- [legal-review-skills](https://github.com/amagilabs/legal-review-skills): Claude Code skills for contract and lease review.
+- [amagi-legal-review-skills](https://github.com/amagilabs/amagi-legal-review-skills): Claude Code skills for contract and lease review.
 
 ## License
 
