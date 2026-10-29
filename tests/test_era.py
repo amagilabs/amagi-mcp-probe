@@ -22,7 +22,7 @@ CLIENT = {"name": "test", "version": "0"}
 def run(mode, **opts):
     opts.setdefault("timeout", 5)
     opts.setdefault("startup_timeout", 10)
-    opts.setdefault("discover_timeout", 1.5)
+    opts.setdefault("discover_timeout", 10)  # a busy machine can be slow to answer; tests that need a timeout pass 1.5
     cmd = fixture_cmd("era_server.py", mode)
     return Prober("e", lambda: StdioTransport(cmd), Options(**opts), "stdio").run()
 
@@ -33,7 +33,7 @@ def checks(result):
 
 def era_connect(server, **kw):
     cmd = fixture_cmd("era_server.py", server)
-    kw.setdefault("discover_timeout", 1.5)
+    kw.setdefault("discover_timeout", 10)
     kw.setdefault("timeout", 10)
     kw.setdefault("use_cache", False)
     return era.connect(lambda: StdioTransport(cmd), CLIENT, **kw)
@@ -54,7 +54,7 @@ def test_modern_server_is_modern():
 
 
 def test_legacy_silent_falls_back_after_timeout():
-    t, hs = era_connect("legacy-silent")
+    t, hs = era_connect("legacy-silent", discover_timeout=1.5)
     t.close()
     assert hs.era == "legacy" and hs.protocol_version == "2025-11-25"
     assert "no answer to server/discover" in hs.fallback
@@ -79,7 +79,7 @@ def test_slow_legacy_crash_restarts_for_initialize(tmp_path):
 
 def test_slow_start_reprobes_after_initialize_says_modern():
     # discover times out, initialize answers -32022 naming 2026-07-28: try discover again
-    t, hs = era_connect("slow-start")
+    t, hs = era_connect("slow-start", discover_timeout=1.5)
     t.close()
     assert hs.era == "modern" and hs.fallback is None
 
@@ -198,7 +198,7 @@ def test_probe_dual_era():
 
 
 def test_probe_legacy_silent_warns():
-    r = run("legacy-silent")
+    r = run("legacy-silent", discover_timeout=1.5)
     assert r.era == "legacy" and r.protocol_version == "2025-11-25"
     assert checks(r) == ["discover-unanswered"]
     assert "no answer to server/discover" in r.era_note
