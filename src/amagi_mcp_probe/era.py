@@ -7,7 +7,8 @@ Legacy (2025-11-25 and earlier) is the `initialize` handshake plus `notification
 `connect()` asks `server/discover` first and falls back to `initialize`, following the
 spec's backward-compatibility rules:
 
-- a DiscoverResult, or a modern error (-32020, -32021, -32022), means the server is modern;
+- a DiscoverResult (it lists supportedVersions), or a modern error (-32020, -32021, -32022),
+  means the server is modern;
 - any other JSON-RPC error, a timeout, or an HTTP 4xx without a JSON-RPC error body means
   it is legacy, so the client sends `initialize` instead.
 
@@ -248,10 +249,15 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
         legacy_only = (hs.supported_versions
                        and not any(is_modern_version(v) for v in hs.supported_versions)
                        and any(v in LEGACY_VERSIONS for v in hs.supported_versions))
-        if not legacy_only:
+        if not hs.supported_versions:
+            # not a DiscoverResult: some legacy servers answer {} to any method they don't know.
+            # If initialize fails too, the retry below goes modern.
+            reason = "server/discover answered without supportedVersions"
+        elif not legacy_only:
             _go_modern(t, hs)
             return t
-        reason = "server/discover lists only legacy versions"
+        else:
+            reason = "server/discover lists only legacy versions"
 
     hs.fallback = reason
     try:

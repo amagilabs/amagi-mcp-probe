@@ -4,10 +4,12 @@ modern             modern-only: server/discover, per-request _meta, -32022 for i
 dual               modern, and answers initialize like a legacy server
 legacy-silent      legacy; never answers server/discover
 legacy-crash       legacy; exits when it gets server/discover
+legacy-lenient     legacy; answers {} to any method it does not know, server/discover included
 modern-nodiscover  modern requests work, but server/discover and initialize are unknown methods
 modern-nocache     modern; no ttlMs/cacheScope/resultType, no serverInfo
 modern-badcodes    modern; wrong error codes, and initialize rejected without naming versions
 modern-mrtr        modern; the `ask` tool answers resultType input_required
+modern-baddiscover modern; the server/discover result has no supportedVersions
 slow-start         ignores the first server/discover, then -32022 to initialize, then modern
 """
 
@@ -26,8 +28,8 @@ TOOLS = [
 ASK = {"name": "ask", "description": "Asks the user something.", "inputSchema": {"type": "object"}}
 
 mode = sys.argv[1]
-modern_ok = mode not in ("legacy-silent", "legacy-crash")
-legacy_ok = mode in ("dual", "legacy-silent", "legacy-crash")
+modern_ok = mode not in ("legacy-silent", "legacy-crash", "legacy-lenient")
+legacy_ok = mode in ("dual", "legacy-silent", "legacy-crash", "legacy-lenient")
 discover_seen = 0
 
 
@@ -77,6 +79,8 @@ def handle_modern(rid, method, params, version):
         if mode == "slow-start" and discover_seen == 1:
             return  # still starting up: never answers this one
         res = {"supportedVersions": MODERN, "capabilities": {"tools": {}}}
+        if mode == "modern-baddiscover":
+            del res["supportedVersions"]
         return result(rid, res, cacheable=True)
     if method == "tools/list":
         return result(rid, {"tools": tools()}, cacheable=True)
@@ -107,6 +111,9 @@ for line in sys.stdin:
                 continue
             if method == "server/discover" and mode == "legacy-crash":
                 sys.exit(3)
+            if mode == "legacy-lenient":
+                send({"jsonrpc": "2.0", "id": rid, "result": {}})
+                continue
             error(rid, -32601, "Method not found")
             continue
         handle_modern(rid, method, params, meta[META_VERSION])

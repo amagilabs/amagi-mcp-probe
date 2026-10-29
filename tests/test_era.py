@@ -73,6 +73,20 @@ def test_slow_start_reprobes_after_initialize_says_modern():
     assert hs.era == "modern" and hs.fallback is None
 
 
+def test_lenient_legacy_server_is_legacy():
+    # {} is not a DiscoverResult: fall back to initialize, which works
+    t, hs = era_connect("legacy-lenient")
+    t.close()
+    assert hs.era == "legacy" and "without supportedVersions" in hs.fallback
+
+
+def test_modern_server_with_bad_discover_is_still_modern():
+    # discover has no supportedVersions, initialize says -32022: modern after all
+    t, hs = era_connect("modern-baddiscover")
+    t.close()
+    assert hs.era == "modern" and hs.fallback is None
+
+
 def test_modern_without_discover_is_detected():
     t, hs = era_connect("modern-nodiscover")
     t.close()
@@ -188,6 +202,17 @@ def test_probe_missing_result_type_and_cache_fields():
     assert tool_checks == ["result-type-missing"]
     msg = next(f.message for f in r.findings if f.check == "cache-fields-missing" and "tools/list" in f.message)
     assert "no ttlMs" in msg and "no cacheScope" in msg
+
+
+def test_probe_bad_discover_result():
+    r = run("modern-baddiscover")
+    assert r.era == "modern"
+    assert "discover-invalid" in checks(r) and r.failed()
+
+
+def test_probe_lenient_legacy_passes():
+    r = run("legacy-lenient")
+    assert r.era == "legacy" and checks(r) == []
 
 
 def test_probe_wrong_error_codes():
