@@ -66,6 +66,17 @@ def test_legacy_crash_restarts_then_falls_back():
     assert hs.era == "legacy" and hs.discover_crashed
 
 
+def test_slow_legacy_crash_restarts_for_initialize(tmp_path):
+    # discover times out while the server starts, then kills it when read: restart, initialize alone
+    cmd = fixture_cmd("era_server.py", "legacy-crash-slow", str(tmp_path / "warm"), "2.5")
+    t, hs = era.connect(lambda: StdioTransport(cmd), CLIENT, timeout=10, discover_timeout=1.5, use_cache=False)
+    try:
+        assert hs.era == "legacy" and hs.discover_crashed and "restarted it" in hs.fallback
+        assert t.request("tools/list", {})["tools"][0]["name"] == "add"
+    finally:
+        t.close()
+
+
 def test_slow_start_reprobes_after_initialize_says_modern():
     # discover times out, initialize answers -32022 naming 2026-07-28: try discover again
     t, hs = era_connect("slow-start")

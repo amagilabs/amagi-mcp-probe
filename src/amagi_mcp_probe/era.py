@@ -82,6 +82,7 @@ class Handshake:
     discover_crashed: bool = False  # the server exited when it got server/discover
     late_discover: bool = False  # server/discover was answered only after the timeout; restarted modern
     from_cache: bool = False
+    transport: Any = field(default=None, repr=False, compare=False)  # the live one, after restarts
 
     def label(self) -> str:
         """modern, legacy, or dual (modern, and its discover result also lists a legacy version)."""
@@ -246,7 +247,7 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
         hs.discover_crashed = True
         reason = f"{exc} on server/discover; restarted it"
         _close(t)
-        t = _start(factory, t.client_info)
+        t = hs.transport = _start(factory, t.client_info)
     except HttpStatusError as exc:
         hs.discover_error = exc
         if not 400 <= exc.status < 500:
@@ -275,6 +276,15 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
         _initialize(t, hs, legacy_version, timeout)
     except ConnectError as err:
         cause = err.cause
+        if isinstance(cause, ServerExited) and timed_out is not None and not hs.discover_crashed:
+            # a slow start: the server read server/discover only after the timeout, and it
+            # exits on unknown methods. Start it again and send initialize alone.
+            _close(t)
+            t = hs.transport = _start(factory, t.client_info)
+            hs.discover_crashed = True
+            hs.fallback = f"{reason}; then it exited on server/discover, so restarted it"
+            _initialize(t, hs, legacy_version, timeout)
+            return t
         if isinstance(cause, RpcError) and (
             cause.code == UNSUPPORTED_VERSION and (any(is_modern_version(v) for v in supported_from(cause.data))
                                                     or not supported_from(cause.data))
@@ -311,12 +321,9 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
     _close(t)
     t = _start(factory, t.client_info)
     hs.__dict__.update(Handshake().__dict__)
+    hs.transport = t
     hs.late_discover = True
-    try:
-        _modern(t, hs, timeout)
-    except ConnectError:
-        _close(t)  # connect() closes only the first transport
-        raise
+    _modern(t, hs, timeout)
     return t
 
 
@@ -355,6 +362,7 @@ def connect(
         if err.handshake is None:
             err.handshake = hs
         _close(t)
+        _close(hs.transport)  # a server _auto() restarted
         raise
     if use_cache:
         _CACHE[key] = hs.era
