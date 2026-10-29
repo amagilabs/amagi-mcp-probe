@@ -153,6 +153,9 @@ class Prober:
             self.result.era = hs.label()
             self.result.supported_versions = list(hs.supported_versions)
             self.result.era_note = hs.fallback
+            if hs.late_discover:
+                self.result.era_note = ("server/discover was answered only after the timeout (a slow start); "
+                                        "started the server again in the modern era")
             if hs.era == "legacy":
                 self._check_initialize(hs.initialize)
                 if hs.discover_crashed or isinstance(hs.discover_error, RequestTimeout):

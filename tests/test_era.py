@@ -87,6 +87,22 @@ def test_modern_server_with_bad_discover_is_still_modern():
     assert hs.era == "modern" and hs.fallback is None
 
 
+def test_slow_dual_server_is_restarted_modern(tmp_path):
+    # the first start sleeps past the discover timeout; its late DiscoverResult means "modern"
+    cmd = fixture_cmd("era_server.py", "dual-slow", str(tmp_path / "warm"), "2.5")
+    t, hs = era.connect(lambda: StdioTransport(cmd), CLIENT, timeout=10, discover_timeout=1.5, use_cache=False)
+    t.close()
+    assert hs.era == "modern" and hs.late_discover and hs.fallback is None and hs.initialize is None
+
+
+def test_probe_slow_dual_server(tmp_path):
+    cmd = fixture_cmd("era_server.py", "dual-slow", str(tmp_path / "warm"), "2.5")
+    r = Prober("e", lambda: StdioTransport(cmd), Options(timeout=5, startup_timeout=10, discover_timeout=1.5),
+               "stdio").run()
+    assert r.era == "dual" and checks(r) == []
+    assert "slow start" in r.era_note
+
+
 def test_modern_without_discover_is_detected():
     t, hs = era_connect("modern-nodiscover")
     t.close()

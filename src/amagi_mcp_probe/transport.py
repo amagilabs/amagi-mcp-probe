@@ -89,6 +89,7 @@ class Transport:
         self.client_info: Dict[str, Any] = {}
         self.noise: List[str] = []
         self.notifications = 0
+        self.late: Dict[Any, Any] = {}  # id -> answers that came after we stopped waiting
 
     # subclass hooks -----------------------------------------------------
     def start(self) -> None:
@@ -178,7 +179,9 @@ class Transport:
                 self.notifications += 1
             return None
         if msg.get("id") != rid:
-            return None  # late answer to a request we already gave up on
+            if "id" in msg:
+                self.late[msg["id"]] = msg  # late answer to a request we already gave up on
+            return None
         if "error" in msg:
             err = msg["error"] if isinstance(msg["error"], dict) else {}
             raise RpcError(err.get("code"), err.get("message", msg["error"]), err.get("data"))

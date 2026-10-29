@@ -11,10 +11,13 @@ modern-badcodes    modern; wrong error codes, and initialize rejected without na
 modern-mrtr        modern; the `ask` tool answers resultType input_required
 modern-baddiscover modern; the server/discover result has no supportedVersions
 slow-start         ignores the first server/discover, then -32022 to initialize, then modern
+dual-slow MARKER SECONDS  dual; the first start (no MARKER file yet) sleeps before reading stdin
 """
 
 import json
+import os
 import sys
+import time
 
 MODERN = ["2026-07-28"]
 LEGACY = ["2025-11-25", "2025-06-18"]
@@ -29,7 +32,7 @@ ASK = {"name": "ask", "description": "Asks the user something.", "inputSchema": 
 
 mode = sys.argv[1]
 modern_ok = mode not in ("legacy-silent", "legacy-crash", "legacy-lenient")
-legacy_ok = mode in ("dual", "legacy-silent", "legacy-crash", "legacy-lenient")
+legacy_ok = mode in ("dual", "dual-slow", "legacy-silent", "legacy-crash", "legacy-lenient")
 discover_seen = 0
 
 
@@ -93,6 +96,10 @@ def handle_modern(rid, method, params, version):
         return error(rid, -32600, "nope")
     return error(rid, -32601, "Method not found")
 
+
+if mode == "dual-slow" and not os.path.exists(sys.argv[2]):
+    open(sys.argv[2], "w").close()
+    time.sleep(float(sys.argv[3]))  # a cold start: npx downloading the package, say
 
 initialized = False
 for line in sys.stdin:

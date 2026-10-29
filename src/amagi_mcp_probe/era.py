@@ -80,6 +80,7 @@ class Handshake:
     fallback: Optional[str] = None  # why initialize was used
     discover_missing: bool = False  # modern server that does not implement server/discover
     discover_crashed: bool = False  # the server exited when it got server/discover
+    late_discover: bool = False  # server/discover was answered only after the timeout; restarted modern
     from_cache: bool = False
 
     def label(self) -> str:
@@ -189,6 +190,14 @@ def _discover(t: Transport, timeout: float) -> Any:
     return t.request("server/discover", {}, timeout=timeout, modern=True, version=LATEST_MODERN)
 
 
+def _late_modern(t: Transport, rid: Optional[int]) -> bool:
+    """Did a server/discover we gave up on come back as a DiscoverResult listing a modern version?"""
+    msg = t.late.get(rid) if rid is not None else None
+    result = msg.get("result") if isinstance(msg, dict) else None
+    versions = result.get("supportedVersions") if isinstance(result, dict) else None
+    return isinstance(versions, list) and any(is_modern_version(v) for v in versions)
+
+
 def _modern(t: Transport, hs: Handshake, timeout: float) -> None:
     """--era modern, or a server cached as modern: discover, no fallback."""
     try:
@@ -207,6 +216,7 @@ def _modern(t: Transport, hs: Handshake, timeout: float) -> None:
 def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_version: str,
           timeout: float, discover_timeout: float) -> Transport:
     reason: Optional[str] = None
+    timed_out: Optional[int] = None  # id of a server/discover that timed out
     try:
         result = _discover(t, discover_timeout)
     except RpcError as exc:
@@ -229,6 +239,7 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
             reason = f"server/discover answered error {exc.code}{status}"
     except RequestTimeout as exc:
         hs.discover_error = exc
+        timed_out = t.last_request_id
         reason = f"no answer to server/discover within {discover_timeout:g}s"
     except ServerExited as exc:
         hs.discover_error = exc
@@ -262,7 +273,6 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
     hs.fallback = reason
     try:
         _initialize(t, hs, legacy_version, timeout)
-        return t
     except ConnectError as err:
         cause = err.cause
         if isinstance(cause, RpcError) and (
@@ -294,6 +304,20 @@ def _auto(factory: Callable[[], Transport], t: Transport, hs: Handshake, legacy_
         hs.initialize = None
         _go_modern(t, hs)
         return t
+    if not _late_modern(t, timed_out):
+        return t
+    # server/discover was answered after all, by a server that was only slow to start (npx
+    # downloading it, say). It is modern, so start it again (warm now) and speak modern.
+    _close(t)
+    t = _start(factory, t.client_info)
+    hs.__dict__.update(Handshake().__dict__)
+    hs.late_discover = True
+    try:
+        _modern(t, hs, timeout)
+    except ConnectError:
+        _close(t)  # connect() closes only the first transport
+        raise
+    return t
 
 
 def connect(
