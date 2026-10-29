@@ -14,18 +14,73 @@ TOOLS = [
 ]
 
 
+MODERN = ["2026-07-28"]
+META_VERSION = "io.modelcontextprotocol/protocolVersion"
+
+
 class State:
     def __init__(self, mode):
-        self.mode = mode  # "json" or "sse"
+        # json or sse: legacy (initialize + sessions). modern, modern-sse: MCP 2026-07-28 only.
+        # modern-badstatus: modern, but errors come back as HTTP 200.
+        self.mode = mode
         self.sessions = set()
         self.deleted = []
         self.calls = []
+        self.modern_headers = []  # (Mcp-Method, Mcp-Name, MCP-Protocol-Version, Mcp-Session-Id)
 
 
 def make_handler(state):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def _modern(self, msg):
+            method, rid = msg.get("method"), msg.get("id")
+            params = msg.get("params") or {}
+            meta = params.get("_meta") or {}
+            h = self.headers
+            state.modern_headers.append((h.get("Mcp-Method"), h.get("Mcp-Name"), h.get("MCP-Protocol-Version"),
+                                         h.get("Mcp-Session-Id")))
+            bad = 200 if state.mode == "modern-badstatus" else None
+
+            def fail(status, code, message, data=None):
+                err = {"code": code, "message": message}
+                if data is not None:
+                    err["data"] = data
+                self._send(bad or status, json.dumps({"jsonrpc": "2.0", "id": rid, "error": err}))
+
+            version = meta.get(META_VERSION)
+            if version is None:  # a legacy client (initialize, or anything without _meta)
+                return fail(400, -32022, "Unsupported protocol version: this server speaks 2026-07-28",
+                            {"supported": MODERN, "requested": params.get("protocolVersion")})
+            if h.get("MCP-Protocol-Version") != version or h.get("Mcp-Method") != method:
+                return fail(400, -32020, "Header mismatch")
+            if version not in MODERN:
+                return fail(400, -32022, "Unsupported protocol version", {"supported": MODERN, "requested": version})
+            info = {"io.modelcontextprotocol/serverInfo": {"name": "http-modern", "version": "2.0"}}
+            if method == "server/discover":
+                result = {"supportedVersions": MODERN, "capabilities": {"tools": {}}}
+            elif method == "tools/list":
+                result = {"tools": TOOLS}
+            elif method == "tools/call":
+                if h.get("Mcp-Name") != params.get("name"):
+                    return fail(400, -32020, "Header mismatch: Mcp-Name")
+                state.calls.append((params["name"], version))
+                args = params.get("arguments") or {}
+                if params["name"] == "add":
+                    total = args["a"] + args["b"]
+                    result = {"content": [{"type": "text", "text": str(total)}], "structuredContent": {"sum": total}}
+                else:
+                    result = {"content": [{"type": "text", "text": h.get("Authorization", "none")}]}
+            else:
+                return fail(404, -32601, "Method not found")
+            result.update(resultType="complete", _meta=info)
+            if method in ("server/discover", "tools/list"):
+                result.update(ttlMs=60000, cacheScope="public")
+            reply = json.dumps({"jsonrpc": "2.0", "id": rid, "result": result})
+            if state.mode == "modern-sse":
+                return self._send(200, f"event: message\ndata: {reply}\n\n", "text/event-stream")
+            self._send(200, reply)
 
         def _send(self, code, body, ctype="application/json", extra=None):
             data = body.encode("utf-8")
@@ -43,6 +98,8 @@ def make_handler(state):
 
         def do_POST(self):
             msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if state.mode.startswith("modern"):
+                return self._modern(msg)
             method, rid = msg.get("method"), msg.get("id")
             extra = {}
             if method == "initialize":

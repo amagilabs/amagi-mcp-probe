@@ -458,7 +458,7 @@ class HttpTransport(Transport):
                             self.noise.append(data[:300])
                         continue
                     for item in (m if isinstance(m, list) else [m]):
-                        hit = self._match(item, rid)
+                        hit = self._match_status(item, rid, resp)
                         if hit:
                             return hit[1]
                 raise TransportError(f"event stream for {msg.get('method')} closed without a response")
@@ -473,10 +473,18 @@ class HttpTransport(Transport):
             self.noise.append(raw[:300].decode("utf-8", errors="replace"))
             raise TransportError(f"response to {msg.get('method')} is not JSON (Content-Type: {ctype or 'none'})") from exc
         for item in (m if isinstance(m, list) else [m]):
-            hit = self._match(item, rid)
+            hit = self._match_status(item, rid, resp)
             if hit:
                 return hit[1]
         raise TransportError(f"no response with id {rid} in the reply to {msg.get('method')}")
+
+    def _match_status(self, item: Any, rid: int, resp: Any) -> Any:
+        try:
+            return self._match(item, rid)
+        except RpcError as exc:
+            if exc.http_status is None:
+                exc.http_status = getattr(resp, "status", None)  # a JSON-RPC error in a 2xx reply
+            raise
 
     def close(self) -> None:
         if not self.session_id:
