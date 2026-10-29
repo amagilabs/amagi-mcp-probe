@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-29)
 
 MCP 2026-07-28 support. The probe now speaks both protocol eras and tells you which one each server uses.
 
