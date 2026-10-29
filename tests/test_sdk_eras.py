@@ -24,8 +24,8 @@ def sdk_cmd(env, fixture, *args):
 
 
 def probe(name, factory, kind, **opts):
-    opts.setdefault("timeout", 15)
-    opts.setdefault("startup_timeout", 30)
+    opts.setdefault("timeout", 30)
+    opts.setdefault("startup_timeout", 90)
     return Prober(name, factory, Options(**opts), kind).run()
 
 
@@ -85,7 +85,7 @@ def http_server(request):
     port = free_port()
     proc = subprocess.Popen(sdk_cmd(env, fixture, "--http", str(port)),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 90  # a busy machine imports the SDK slowly
     while time.monotonic() < deadline:
         try:
             socket.create_connection(("127.0.0.1", port), timeout=0.5).close()

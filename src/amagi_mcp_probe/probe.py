@@ -252,7 +252,8 @@ class Prober:
                   "clientInfo": dict(t.client_info)}
         try:
             t.start()
-            init = t.request("initialize", params, timeout=min(self.opt.startup_timeout, 10.0), modern=False)
+            # a fresh start: give it the same time as the first one
+            init = t.request("initialize", params, timeout=self.opt.startup_timeout, modern=False)
         except RpcError as exc:
             self.result.era = "modern"
             named = supported_from(exc.data) or [v for v in MODERN_VERSIONS if v in str(exc.message)]
