@@ -1,6 +1,6 @@
 # amagi-mcp-probe
 
-Smoke-test any MCP server in one command: it starts the server, checks every tool schema, calls every tool with valid generated arguments, and fails your CI build on crashes, hangs, and schema violations.
+Smoke-test any MCP server in one command: it starts the server, checks every tool schema, calls every tool with valid generated arguments, and fails your CI build on crashes, hangs, and schema violations. It speaks both MCP 2026-07-28 (`server/discover`) and the older `initialize` handshake.
 
 ![demo](assets/demo.gif)
 
@@ -22,17 +22,17 @@ amagi-mcp-probe -- npx -y @modelcontextprotocol/server-everything
 amagi-mcp-probe --url http://localhost:3001/mcp
 ```
 
-The probe runs the `initialize` handshake, pages through `tools/list`, validates each `inputSchema` and `outputSchema`, then calls each tool once with arguments built from its schema. Every result is checked as a `CallToolResult`, and `structuredContent` is checked against the tool's `outputSchema`.
+The probe sends `server/discover` first and falls back to the `initialize` handshake if the server predates MCP 2026-07-28. Then it pages through `tools/list`, validates each `inputSchema` and `outputSchema`, then calls each tool once with arguments built from its schema. Every result is checked as a `CallToolResult`, and `structuredContent` is checked against the tool's `outputSchema`.
 
 Real output from `examples/servers/buggy_server.py`, a small server in this repo with one bug per tool:
 
 ```
 $ amagi-mcp-probe --timeout 3 -- python examples/servers/buggy_server.py
 buggy_server.py: python examples/servers/buggy_server.py
-  buggy 0.3.0, protocol 2025-11-25, ready in 1312 ms
+  buggy 0.3.0, protocol 2025-11-25, era legacy, ready in 906 ms
 
   PASS  echo          <1 ms
-  FAIL  resize_image  156 ms
+  FAIL  resize_image  110 ms
         error  server-crash: server process exited (code 1) while running this tool
               serve("buggy", "0.3.0", TOOLS)
               ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -67,7 +67,7 @@ A well-behaved server looks like this:
 ```
 $ amagi-mcp-probe -- python examples/servers/notes_server.py
 notes_server.py: python examples/servers/notes_server.py
-  notes 1.0.0, protocol 2025-11-25, ready in 2235 ms
+  notes 1.0.0, protocol 2025-11-25, era legacy, ready in 922 ms
 
   PASS  add_note      <1 ms
   WARN  get_note      <1 ms
@@ -84,6 +84,36 @@ On the official reference servers, run on Windows with Node 24:
 - `@modelcontextprotocol/server-everything` 2.0.0 over stdio: 16 tools, 16 passed.
 - The same server over Streamable HTTP (`--url`): 16 tools, 16 passed.
 - `@modelcontextprotocol/server-filesystem` 2.0.0 on a scratch folder: 14 tools, 8 passed, 3 warned (`read_file` on a path that doesn't exist), 3 skipped (`write_file`, `edit_file` and `move_file` are marked destructive).
+
+### MCP 2026-07-28 servers
+
+MCP 2026-07-28 drops the `initialize` handshake and sessions. A client calls `server/discover`, and every request carries the protocol version, client info and client capabilities in `params._meta` (over HTTP, also in the `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers). The probe works out which era each server speaks:
+
+- A `server/discover` result, or error -32022 (unsupported protocol version), means the server is modern.
+- Any other error, a timeout, or an HTTP 4xx without a JSON-RPC error body means it is older, so the probe sends `initialize` instead.
+
+The era shows up in every report: `legacy` (initialize only), `modern` (2026-07-28 only), or `dual` (both; the probe opens a second, initialize-only connection to find out). Here is a server built on the official Python SDK, mcp 2.3.0, over Streamable HTTP:
+
+```
+$ amagi-mcp-probe --url http://127.0.0.1:48731/mcp
+server: http://127.0.0.1:48731/mcp
+  sdk-dual 2.0.0, protocol 2026-07-28, era dual (2026-07-28, 2025-11-25), ready in 62 ms
+
+  PASS  add   <1 ms
+  PASS  echo  14 ms
+
+2 tools: 2 passed.  PASS
+```
+
+On a modern server the probe also checks:
+
+- `server/discover` exists and returns `supportedVersions`, `capabilities` and `serverInfo` (in `_meta`).
+- Every result has a `resultType`, and the `server/discover` and `tools/list` results have `ttlMs` and `cacheScope`.
+- A request declaring an unknown protocol version gets -32022 with the supported versions (HTTP 400), and an unknown method gets -32601 (HTTP 404).
+- A legacy client that sends `initialize` to a modern-only server is told which versions to use (-32022), not just refused.
+- A tool that answers `resultType: "input_required"` (it wants input from the user mid-call) is reported as a warning.
+
+`--era modern` or `--era legacy` skips detection and forces one.
 
 ### How arguments are generated
 
@@ -118,9 +148,10 @@ It reads the `mcpServers` format used by Claude Code and Claude Desktop, and the
 
 ### What it checks
 
-`amagi-mcp-probe --list-checks` prints all 28 check ids. The main ones:
+`amagi-mcp-probe --list-checks` prints all 37 check ids. The main ones:
 
-- Startup: the server starts, answers `initialize` within `--startup-timeout`, and returns `protocolVersion`, `capabilities`, and `serverInfo`.
+- Startup: the server starts, answers `server/discover` or `initialize` within `--startup-timeout`, and returns its protocol version, capabilities, and server info.
+- Modern servers: `server/discover`, `resultType`, `ttlMs` and `cacheScope`, and the error codes described above.
 - stdout: anything on stdout that isn't JSON-RPC (a stray `print`, a startup banner) is an error, because it breaks real clients. The probe tells you which tool was running when it appeared.
 - Tool definitions: names, duplicates, missing descriptions, `inputSchema` that isn't a valid object schema, `required` properties that aren't defined, and invalid `outputSchema`.
 - Calls: crashes, timeouts, JSON-RPC errors on schema-valid arguments, malformed results, `isError: true`, and `structuredContent` that is missing or doesn't match `outputSchema`.
@@ -131,7 +162,8 @@ Use `--ignore CHECK` to drop a check you don't care about.
 
 ```bash
 amagi-mcp-probe --timeout 10 -- ...            # seconds per tools/list and tools/call (default 30)
-amagi-mcp-probe --startup-timeout 60 -- ...    # seconds for the initialize handshake (default 30)
+amagi-mcp-probe --startup-timeout 60 -- ...    # seconds for server/discover or initialize (default 30)
+amagi-mcp-probe --era legacy -- ...            # skip detection: modern or legacy (default auto)
 amagi-mcp-probe --only 'get_*' -- ...          # call only matching tools (repeatable)
 amagi-mcp-probe --skip send_email -- ...       # never call these tools (repeatable)
 amagi-mcp-probe --no-call -- ...               # check schemas only, call nothing
@@ -180,6 +212,8 @@ This repo ships a skill at `.claude/skills/amagi-mcp-probe/SKILL.md`. Copy that 
 
 - It calls your tools for real. A tool that sends email, charges a card, or deletes files will do that, so point the server at a sandbox. Tools marked `destructiveHint: true` are skipped by default, but only if the server marks them.
 - Transports: stdio and Streamable HTTP. The legacy HTTP+SSE transport is not supported.
+- When a legacy stdio server ignores `server/discover` instead of answering with an error, the probe waits up to 10 seconds (or `--startup-timeout`, if shorter) before it falls back to `initialize`. It reports that as a `discover-unanswered` warning.
+- A tool that answers `resultType: "input_required"` isn't completed: the probe doesn't answer the server's input requests.
 - Generated arguments are minimal and know nothing about your data, so expect some `tool-error` warnings for lookups like `get_note`. Use `--args` for those.
 - The probe declares no client capabilities, so tools that need sampling, elicitation, or roots from the client aren't fully exercised. Tools that require task-based execution are skipped.
 - `pattern` regexes are checked with Python's `re`. A pattern that uses ECMA-262 syntax Python lacks (such as `\p{L}`) gets a `schema-note` warning instead of a false error.
