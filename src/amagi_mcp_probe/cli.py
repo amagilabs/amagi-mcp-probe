@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, default=30.0, metavar="SEC",
                      help="seconds to wait for each tools/list and tools/call (default 30)")
     run.add_argument("--startup-timeout", type=float, default=30.0, metavar="SEC",
-                     help="seconds to wait for the initialize handshake (default 30)")
+                     help="seconds to wait for the handshake: server/discover or initialize (default 30)")
     run.add_argument("--only", action="append", default=[], metavar="GLOB", help="call only matching tools")
     run.add_argument("--skip", action="append", default=[], metavar="GLOB", help="do not call matching tools")
     run.add_argument("--no-call", action="store_true", help="check schemas only, call nothing")
@@ -64,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help='JSON file of real arguments per tool: {"tool": {...}} or {"tool": [{...}, {...}]}')
     run.add_argument("--protocol-version", default=LATEST_PROTOCOL, metavar="VER",
                      help=f"protocol version to request in initialize (default {LATEST_PROTOCOL})")
+    run.add_argument("--era", choices=["auto", "modern", "legacy"], default="auto",
+                     help="auto: try MCP 2026-07-28 server/discover, fall back to initialize (default); "
+                          "modern or legacy: skip the other")
     out = p.add_argument_group("output")
     out.add_argument("--format", choices=sorted(RENDERERS), default="text", help="stdout format (default text)")
     out.add_argument("--junit", metavar="FILE", help="also write a JUnit XML report")
@@ -208,6 +211,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args=tool_args,
         ignore=set(args.ignore),
         protocol_version=args.protocol_version,
+        era=args.era,
     )
     results = [_run_spec(s, options) for s in specs]
 

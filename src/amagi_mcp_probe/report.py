@@ -40,6 +40,14 @@ def _ms(ms: int) -> str:
     return "<1 ms" if ms < 1 else f"{ms} ms"
 
 
+def _era(r: ServerResult) -> str:
+    """'era dual (2026-07-28, 2025-11-25)': the MCP era and the versions the server listed."""
+    if not r.era:
+        return ""
+    versions = f" ({', '.join(r.supported_versions)})" if r.supported_versions else ""
+    return f"era {r.era}{versions}"
+
+
 def _finding_line(f: Finding) -> str:
     sev = "error" if f.severity == ERROR else "warn"
     return f"{sev}  {f.check}: {f.message}"
@@ -54,8 +62,9 @@ def render_text(results: List[ServerResult], strict: bool = False, verbose: bool
         who = " ".join(str(info[k]) for k in ("name", "version") if k in info) or "unknown server"
         out.append(f"{r.name}: {r.target}")
         if r.protocol_version or r.startup_ms is not None:
+            era = f", {_era(r)}" if r.era else ""
             ms = f", ready in {r.startup_ms} ms" if r.startup_ms is not None else ""
-            out.append(f"  {who}, protocol {r.protocol_version or '?'}{ms}")
+            out.append(f"  {who}, protocol {r.protocol_version or '?'}{era}{ms}")
         for f in r.findings:
             out.append("  " + _finding_line(f))
             out.extend("      " + d for d in f.detail[:8])
@@ -130,6 +139,8 @@ def render_markdown(results: List[ServerResult], strict: bool = False) -> str:
             meta.append(who)
         if r.protocol_version:
             meta.append(f"protocol {r.protocol_version}")
+        if r.era:
+            meta.append(_era(r))
         out.append(" · ".join(meta))
         out.append("")
         if r.findings:
@@ -192,9 +203,15 @@ def render_junit(results: List[ServerResult], strict: bool = False) -> str:
         total_fail += fails
         total_skip += skips
         body = "\n".join(c[0] for c in cases)
+        props = ""
+        if r.era:
+            items = [("era", r.era), ("protocolVersion", r.protocol_version or ""),
+                     ("supportedVersions", ",".join(r.supported_versions))]
+            props = ("    <properties>" + "".join(f"<property name={quoteattr(k)} value={quoteattr(v)}/>"
+                                                   for k, v in items) + "</properties>\n")
         suites.append(
             f'  <testsuite name={quoteattr("mcp-probe." + r.name)} tests="{len(cases)}" '
-            f'failures="{fails}" errors="0" skipped="{skips}">\n{body}\n  </testsuite>'
+            f'failures="{fails}" errors="0" skipped="{skips}">\n{props}{body}\n  </testsuite>'
         )
     head = (f'<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="amagi-mcp-probe" '
             f'tests="{total_tests}" failures="{total_fail}" errors="0" skipped="{total_skip}">')

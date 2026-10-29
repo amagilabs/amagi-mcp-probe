@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import os
@@ -36,14 +37,45 @@ class RequestTimeout(TransportError):
     """No response arrived within the timeout."""
 
 
-class RpcError(Exception):
-    """The server answered with a JSON-RPC error object."""
+class HttpStatusError(TransportError):
+    """An HTTP error status whose body is not a JSON-RPC error object."""
 
-    def __init__(self, code: Any, message: Any, data: Any = None):
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self.body = body
+        super().__init__(f"HTTP {status} from server: {body.strip()[:200]}")
+
+
+class RpcError(Exception):
+    """The server answered with a JSON-RPC error object. http_status: the HTTP status it came with."""
+
+    def __init__(self, code: Any, message: Any, data: Any = None, http_status: Optional[int] = None):
         self.code = code
         self.message = message
         self.data = data
+        self.http_status = http_status
         super().__init__(f"JSON-RPC error {code}: {message}")
+
+
+# MCP 2026-07-28 ("modern") request metadata, sent in params._meta on every request
+META_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+META_CLIENT_CAPS = "io.modelcontextprotocol/clientCapabilities"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+# methods whose target goes in the Mcp-Name header, and the param it comes from
+NAMED_METHODS = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+
+
+def header_value(value: str) -> str:
+    """A header-safe value: visible ASCII as is, anything else as the =?base64?...?= sentinel."""
+    plain = (
+        all(0x20 <= ord(c) <= 0x7E for c in value)
+        and value == value.strip(" ")
+        and not (value.startswith("=?base64?") and value.endswith("?="))
+    )
+    if plain:
+        return value
+    return "=?base64?" + base64.b64encode(value.encode("utf-8")).decode("ascii") + "?="
 
 
 class Transport:
@@ -52,6 +84,9 @@ class Transport:
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self.protocol_version: Optional[str] = None
+        # "modern": every request carries the 2026-07-28 _meta envelope; "legacy": initialize handshake
+        self.era: Optional[str] = None
+        self.client_info: Dict[str, Any] = {}
         self.noise: List[str] = []
         self.notifications = 0
 
@@ -71,6 +106,10 @@ class Transport:
     def alive(self) -> bool:
         return True
 
+    def cache_key(self) -> str:
+        """Identifies the server for the era cache."""
+        return self.describe()
+
     # shared -------------------------------------------------------------
     def _handle_server_request(self, msg: Dict[str, Any]) -> None:
         """Answer a request the server sent us. We only implement ping."""
@@ -89,15 +128,43 @@ class Transport:
             msg["params"] = params
         self._send(msg)
 
-    def request(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 10.0) -> Any:
+    def modern_meta(self, version: Optional[str] = None) -> Dict[str, Any]:
+        meta: Dict[str, Any] = {META_VERSION: version or self.protocol_version, META_CLIENT_CAPS: {}}
+        if self.client_info:
+            meta[META_CLIENT_INFO] = dict(self.client_info)
+        return meta
+
+    def request(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: float = 10.0,
+        modern: Optional[bool] = None,
+        version: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        """Send one request and wait for its answer.
+
+        Modern requests (era "modern", or modern=True) carry the 2026-07-28 `_meta` envelope;
+        `version` overrides the protocol version they declare. `headers` are extra HTTP
+        headers for modern requests (Mcp-Param-*); stdio ignores them.
+        """
         rid = next(self._ids)
         self.last_request_id = rid
         msg: Dict[str, Any] = {"jsonrpc": "2.0", "id": rid, "method": method}
+        if modern is None:
+            modern = self.era == "modern"
+        if modern:
+            params = dict(params or {})
+            meta = dict(params.get("_meta") or {})
+            meta.update(self.modern_meta(version))
+            params["_meta"] = meta
         if params is not None:
             msg["params"] = params
-        return self._roundtrip(msg, rid, timeout)
+        return self._roundtrip(msg, rid, timeout, headers if modern else None)
 
-    def _roundtrip(self, msg: Dict[str, Any], rid: int, timeout: float) -> Any:
+    def _roundtrip(self, msg: Dict[str, Any], rid: int, timeout: float,
+                   headers: Optional[Dict[str, str]] = None) -> Any:
         raise NotImplementedError
 
     def _match(self, msg: Any, rid: int) -> Optional[tuple]:
@@ -149,6 +216,9 @@ class StdioTransport(Transport):
 
     def describe(self) -> str:
         return " ".join(self.command)
+
+    def cache_key(self) -> str:
+        return f"{self.cwd or ''}|{self.describe()}"
 
     def start(self) -> None:
         argv = resolve_command(self.command)
@@ -233,7 +303,8 @@ class StdioTransport(Transport):
         except subprocess.TimeoutExpired:
             return None
 
-    def _roundtrip(self, msg: Dict[str, Any], rid: int, timeout: float) -> Any:
+    def _roundtrip(self, msg: Dict[str, Any], rid: int, timeout: float,
+                   headers: Optional[Dict[str, str]] = None) -> Any:
         self._send(msg)
         deadline = time.monotonic() + timeout
         while True:
@@ -310,62 +381,71 @@ class HttpTransport(Transport):
         if not self.url.startswith(("http://", "https://")):
             raise TransportError(f"not an http(s) URL: {self.url}")
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, msg: Optional[Dict[str, Any]] = None,
+                 extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         h = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "User-Agent": "amagi-mcp-probe",
         }
-        if self.session_id:
-            h["Mcp-Session-Id"] = self.session_id
-        if self.protocol_version:
-            h["MCP-Protocol-Version"] = self.protocol_version
+        params = (msg or {}).get("params")
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        if isinstance(meta, dict) and META_VERSION in meta:
+            # 2026-07-28: no session; version, method and target are mirrored in headers
+            h["MCP-Protocol-Version"] = str(meta[META_VERSION])
+            method = msg.get("method") if msg else None
+            if isinstance(method, str):
+                h["Mcp-Method"] = method
+                key = NAMED_METHODS.get(method)
+                value = params.get(key) if key else None
+                if isinstance(value, str):
+                    h["Mcp-Name"] = header_value(value)
+            h.update(extra or {})
+        else:
+            if self.session_id:
+                h["Mcp-Session-Id"] = self.session_id
+            if self.protocol_version and self.era != "modern":
+                h["MCP-Protocol-Version"] = self.protocol_version
         h.update(self.headers)
         return h
 
-    def _post(self, msg: Dict[str, Any], timeout: float):
+    def _post(self, msg: Dict[str, Any], timeout: float, extra: Optional[Dict[str, str]] = None):
         body = json.dumps(msg).encode("utf-8")
-        req = urllib.request.Request(self.url, data=body, headers=self._headers(), method="POST")
+        req = urllib.request.Request(self.url, data=body, headers=self._headers(msg, extra), method="POST")
         try:
             resp = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(500).decode("utf-8", errors="replace")
+            detail = exc.read(4000).decode("utf-8", errors="replace")
             try:
                 parsed = json.loads(detail)
-                if isinstance(parsed, dict) and "error" in parsed:
-                    return [parsed]
             except ValueError:
-                pass
-            raise TransportError(f"HTTP {exc.code} from server: {detail.strip()[:200]}") from exc
+                parsed = None
+            if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+                err = parsed["error"]
+                raise RpcError(err.get("code"), err.get("message"), err.get("data"), http_status=exc.code) from exc
+            raise HttpStatusError(exc.code, detail) from exc
         except (TimeoutError, OSError) as exc:
             if "timed out" in str(exc).lower():
                 raise RequestTimeout(f"no response to {msg.get('method')} within {timeout:g}s") from exc
             raise TransportError(f"could not reach {self.url}: {exc}") from exc
         sid = resp.headers.get("Mcp-Session-Id")
-        if sid:
+        if sid and self.era != "modern":
             self.session_id = sid
         ctype = (resp.headers.get("Content-Type") or "").lower()
         return resp, ctype
 
     def _send(self, msg: Dict[str, Any]) -> None:
-        out = self._post(msg, timeout=10)
-        if isinstance(out, list):
-            return
-        resp, _ = out
+        try:
+            resp, _ = self._post(msg, timeout=10)
+        except RpcError:
+            return  # an error answer to a notification: nothing to wait for
         resp.read()
         resp.close()
 
-    def _roundtrip(self, msg: Dict[str, Any], rid: int, timeout: float) -> Any:
+    def _roundtrip(self, msg: Dict[str, Any], rid: int, timeout: float,
+                   headers: Optional[Dict[str, str]] = None) -> Any:
         deadline = time.monotonic() + timeout
-        out = self._post(msg, timeout)
-        if isinstance(out, list):
-            messages = out
-            for m in messages:
-                hit = self._match(m, rid)
-                if hit:
-                    return hit[1]
-            raise TransportError("server answered with an error body but no matching response")
-        resp, ctype = out
+        resp, ctype = self._post(msg, timeout, headers)
         try:
             if "text/event-stream" in ctype:
                 for data in _sse_events(resp, deadline):
@@ -432,6 +512,7 @@ def _sse_events(resp, deadline: float):
 
 
 __all__ = [
+    "HttpStatusError",
     "HttpTransport",
     "RequestTimeout",
     "RpcError",
@@ -439,5 +520,6 @@ __all__ = [
     "StdioTransport",
     "Transport",
     "TransportError",
+    "header_value",
     "resolve_command",
 ]

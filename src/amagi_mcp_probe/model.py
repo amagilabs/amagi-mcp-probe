@@ -11,10 +11,19 @@ WARNING = "warning"
 # check id -> (default severity, one-line description). Order is the order of --list-checks.
 CHECKS: Dict[str, tuple] = {
     "server-start": (ERROR, "the server command could not be started, or the URL could not be reached"),
-    "initialize-timeout": (ERROR, "no answer to `initialize` within --startup-timeout"),
-    "initialize-error": (ERROR, "`initialize` failed: JSON-RPC error, or the server exited during the handshake"),
+    "initialize-timeout": (ERROR, "no answer to `server/discover` or `initialize` within --startup-timeout"),
+    "initialize-error": (ERROR, "the handshake failed: JSON-RPC error, or the server exited during it"),
     "initialize-invalid": (ERROR, "the `initialize` result is missing protocolVersion, capabilities or serverInfo"),
     "protocol-version": (WARNING, "the server answered with a protocol version this probe does not know"),
+    "discover-unanswered": (WARNING, "legacy server crashed on, or never answered, `server/discover` (should be -32601)"),
+    "discover-missing": (ERROR, "modern server does not implement `server/discover`"),
+    "discover-invalid": (ERROR, "the `server/discover` result has no supportedVersions list or capabilities object"),
+    "server-info-missing": (WARNING, "modern server sends no `_meta` serverInfo in its server/discover result"),
+    "result-type-missing": (ERROR, "modern result has no `resultType` (or not complete / input_required)"),
+    "cache-fields-missing": (ERROR, "modern tools/list or server/discover result lacks a valid ttlMs or cacheScope"),
+    "error-code": (ERROR, "modern server: wrong error for a bad version (-32022, HTTP 400) or unknown method (-32601, HTTP 404)"),
+    "legacy-rejected-unhelpful": (WARNING, "modern-only server rejects `initialize` without naming its versions (-32022)"),
+    "input-required": (WARNING, "tool returned resultType input_required; the probe does not answer input requests"),
     "no-tools-capability": (WARNING, "the server lists tools but did not declare the `tools` capability"),
     "tools-list-error": (ERROR, "`tools/list` failed, timed out, or returned something that is not a tool list"),
     "stdout-noise": (ERROR, "the server wrote non-JSON-RPC text to stdout (breaks real clients)"),
@@ -77,6 +86,9 @@ class ServerResult:
     target: str
     transport: str
     protocol_version: Optional[str] = None
+    era: Optional[str] = None  # modern | dual | legacy (MCP 2026-07-28 vs the initialize handshake)
+    supported_versions: List[str] = field(default_factory=list)
+    era_note: Optional[str] = None  # why the probe fell back to initialize
     server_info: Dict[str, Any] = field(default_factory=dict)
     startup_ms: Optional[int] = None
     findings: List[Finding] = field(default_factory=list)

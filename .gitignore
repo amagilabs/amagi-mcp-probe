@@ -8,3 +8,4 @@ build/
 dist/
 .env
 launch_plan.json
+tests/.sdk-envs/

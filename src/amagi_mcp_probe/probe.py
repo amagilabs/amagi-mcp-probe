@@ -13,10 +13,32 @@ from . import __version__
 from .model import CHECKS, ERROR, Finding, ServerResult, ToolResult
 from .samples import Unsatisfiable, generate
 from .schemas import make_validator, schema_problems
-from .transport import RequestTimeout, RpcError, ServerExited, Transport, TransportError
+from .era import (
+    LATEST_LEGACY,
+    LEGACY_VERSIONS,
+    MODERN_VERSIONS,
+    UNSUPPORTED_VERSION,
+    ConnectError,
+    Handshake,
+    connect,
+    supported_from,
+)
+from .transport import (
+    META_SERVER_INFO,
+    HttpStatusError,
+    RequestTimeout,
+    RpcError,
+    ServerExited,
+    Transport,
+    TransportError,
+)
 
-LATEST_PROTOCOL = "2025-11-25"
-KNOWN_PROTOCOLS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+LATEST_PROTOCOL = LATEST_LEGACY
+KNOWN_PROTOCOLS = set(LEGACY_VERSIONS + MODERN_VERSIONS)
+RESULT_TYPES = {"complete", "input_required"}
+CACHE_SCOPES = {"public", "private"}
+BOGUS_VERSION = "2099-01-01"  # a version no server supports, to check the -32022 answer
+BOGUS_METHOD = "amagi-mcp-probe/no-such-method"
 TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 CONTENT_TYPES = {"text", "image", "audio", "resource_link", "resource"}
 MAX_PAGES = 100
@@ -59,6 +81,9 @@ class Options:
     ignore: Set[str] = field(default_factory=set)
     protocol_version: str = LATEST_PROTOCOL
     max_restarts: int = 3
+    era: str = "auto"  # auto | modern | legacy
+    discover_timeout: Optional[float] = None  # default: min(startup_timeout, 10s)
+    era_checks: bool = True  # on modern servers: try initialize, a bad version, an unknown method
 
 
 class _Recorder:
@@ -90,48 +115,53 @@ class Prober:
         self._stderr_seen: List[str] = []
 
     # session ----------------------------------------------------------------
-    def _connect(self, first: bool) -> bool:
-        """Start the server and run the initialize handshake. Returns False on failure."""
+    def _make(self) -> Transport:
         t = self.factory()
         self.transport = t
         self.result.target = t.describe()
+        return t
+
+    def _connect(self, first: bool) -> bool:
+        """Start the server and open a session (server/discover, or initialize). Returns False on failure."""
         start = time.monotonic()
         bucket = self.result.findings
+        mode = self.opt.era if first else (self._era or self.opt.era)
         try:
-            t.start()
-        except TransportError as exc:
-            self.rec.add(bucket, "server-start", str(exc))
+            t, hs = connect(
+                self._make,
+                {"name": "amagi-mcp-probe", "version": __version__},
+                mode=mode,
+                legacy_version=self.opt.protocol_version,
+                timeout=self.opt.startup_timeout,
+                discover_timeout=self.opt.discover_timeout,
+                use_cache=False,  # a fresh check every run; restarts reuse self._era
+            )
+        except ConnectError as err:
+            if err.stage == "start":
+                self.rec.add(bucket, "server-start", str(err))
+                return False
+            detail = self._stderr(self.transport) if self.transport is not None else []
+            if isinstance(err.cause, RequestTimeout):
+                self.rec.add(bucket, "initialize-timeout", str(err), detail=detail)
+            else:
+                self.rec.add(bucket, "initialize-error", str(err), detail=detail)
             return False
-        params = {
-            "protocolVersion": self.opt.protocol_version,
-            "capabilities": {},
-            "clientInfo": {"name": "amagi-mcp-probe", "version": __version__},
-        }
-        try:
-            init = t.request("initialize", params, timeout=self.opt.startup_timeout)
-        except RequestTimeout:
-            self.rec.add(bucket, "initialize-timeout",
-                         f"no answer to initialize within {self.opt.startup_timeout:g}s", detail=self._stderr(t))
-            return False
-        except ServerExited as exc:
-            self.rec.add(bucket, "initialize-error", f"{exc} during initialize", detail=self._stderr(t))
-            return False
-        except RpcError as exc:
-            self.rec.add(bucket, "initialize-error", str(exc), detail=self._stderr(t))
-            return False
-        except TransportError as exc:
-            self.rec.add(bucket, "initialize-error", str(exc))
-            return False
+        self.transport = t
         if first:
             self.result.startup_ms = _ms(start)
-            self._check_initialize(init)
-        version = init.get("protocolVersion") if isinstance(init, dict) else None
-        t.protocol_version = version if isinstance(version, str) else self.opt.protocol_version
-        try:
-            t.notify("notifications/initialized")
-        except TransportError as exc:
-            self.rec.add(bucket, "initialize-error", f"could not send notifications/initialized: {exc}")
-            return False
+            self._era = hs.era
+            self.result.era = hs.label()
+            self.result.supported_versions = list(hs.supported_versions)
+            self.result.era_note = hs.fallback
+            if hs.era == "legacy":
+                self._check_initialize(hs.initialize)
+                if hs.discover_crashed or isinstance(hs.discover_error, RequestTimeout):
+                    what = "exited" if hs.discover_crashed else "did not answer"
+                    self.rec.add(bucket, "discover-unanswered",
+                                 f"the server {what} on server/discover; dual-era clients only fall back to "
+                                 "initialize after a timeout or a restart (answer unknown methods with -32601)")
+            else:
+                self._check_discover(hs)
         return True
 
     def _check_initialize(self, init: Any) -> None:
@@ -154,6 +184,151 @@ class Prober:
             self.rec.add(bucket, "initialize-invalid", "serverInfo is not an object")
         caps = init.get("capabilities")
         self._caps = caps if isinstance(caps, dict) else {}
+
+    def _check_discover(self, hs: Handshake) -> None:
+        """A modern server: check its DiscoverResult, and how it treats legacy clients and bad requests."""
+        bucket = self.result.findings
+        self._caps = dict(hs.capabilities)
+        self.result.protocol_version = hs.protocol_version
+        self.result.server_info = dict(hs.server_info)
+        if hs.discover_missing:
+            self.rec.add(bucket, "discover-missing",
+                         f"server/discover failed ({hs.discover_error}), but modern requests work; "
+                         "servers MUST implement server/discover")
+        else:
+            res = hs.discover
+            if not isinstance(res, dict):
+                self.rec.add(bucket, "discover-invalid",
+                             f"server/discover result is {type(res).__name__}, not an object")
+            else:
+                versions = res.get("supportedVersions")
+                if not isinstance(versions, list) or not versions or not all(isinstance(v, str) for v in versions):
+                    self.rec.add(bucket, "discover-invalid",
+                                 "server/discover result needs a non-empty `supportedVersions` list of strings")
+                if not isinstance(res.get("capabilities"), dict):
+                    self.rec.add(bucket, "discover-invalid", "server/discover result has no `capabilities` object")
+                self._check_modern_result("server/discover", res, bucket, cacheable=True)
+                if not hs.server_info:
+                    self.rec.add(bucket, "server-info-missing",
+                                 f"server/discover result has no _meta[\"{META_SERVER_INFO}\"] (name, version)")
+                if hs.supported_versions and not any(v in MODERN_VERSIONS for v in hs.supported_versions):
+                    self.rec.add(bucket, "protocol-version",
+                                 f"server supports {', '.join(hs.supported_versions)}; this probe speaks "
+                                 + ", ".join(MODERN_VERSIONS + LEGACY_VERSIONS))
+        if self.opt.era_checks:
+            if self.opt.era == "auto":
+                self._check_legacy_client()
+            self._check_error_codes()
+
+    def _check_modern_result(self, what: str, result: Any, bucket: List[Finding], cacheable: bool = False,
+                             tool: Optional[str] = None) -> None:
+        """resultType on every modern result; ttlMs and cacheScope on cacheable ones (lists, discover)."""
+        if not isinstance(result, dict):
+            return
+        kind = result.get("resultType")
+        if kind is None:
+            self.rec.add(bucket, "result-type-missing", f"{what} result has no `resultType`", tool)
+        elif kind not in RESULT_TYPES:
+            self.rec.add(bucket, "result-type-missing",
+                         f"{what} resultType {kind!r} is not \"complete\" or \"input_required\"", tool)
+        if not cacheable:
+            return
+        missing = []
+        ttl = result.get("ttlMs")
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl < 0:
+            missing.append("no ttlMs" if ttl is None else f"ttlMs {ttl!r} is not a number >= 0")
+        scope = result.get("cacheScope")
+        if scope not in CACHE_SCOPES:
+            missing.append("no cacheScope" if scope is None else f"cacheScope {scope!r} is not \"public\" or \"private\"")
+        if missing:
+            self.rec.add(bucket, "cache-fields-missing", f"{what} result: " + "; ".join(missing), tool)
+
+    def _check_legacy_client(self) -> None:
+        """Open a second connection the old way (initialize only): dual-era servers answer it."""
+        bucket = self.result.findings
+        t = self.factory()
+        t.client_info = {"name": "amagi-mcp-probe", "version": __version__}
+        params = {"protocolVersion": self.opt.protocol_version, "capabilities": {},
+                  "clientInfo": dict(t.client_info)}
+        try:
+            t.start()
+            init = t.request("initialize", params, timeout=min(self.opt.startup_timeout, 10.0), modern=False)
+        except RpcError as exc:
+            self.result.era = "modern"
+            named = supported_from(exc.data) or [v for v in MODERN_VERSIONS if v in str(exc.message)]
+            if exc.code != UNSUPPORTED_VERSION or not named:
+                self.rec.add(bucket, "legacy-rejected-unhelpful",
+                             f"initialize (a legacy client) got {exc}; a modern-only server SHOULD answer "
+                             "-32022 naming its supported versions, the only hint a legacy client can show")
+            return
+        except TransportError as exc:
+            self.result.era = "modern"
+            self.rec.add(bucket, "legacy-rejected-unhelpful",
+                         f"initialize (a legacy client) got no JSON-RPC answer ({exc}); a modern-only server "
+                         "SHOULD answer -32022 naming its supported versions")
+            return
+        finally:
+            try:
+                t.close()
+            except Exception:
+                pass
+        if isinstance(init, dict) and isinstance(init.get("protocolVersion"), str):
+            self.result.era = "dual"
+            if init["protocolVersion"] not in self.result.supported_versions:
+                self.result.supported_versions.append(init["protocolVersion"])
+        else:
+            self.result.era = "modern"
+
+    def _check_error_codes(self) -> None:
+        """-32022 (HTTP 400) for an unsupported version; -32601 (HTTP 404) for an unknown method."""
+        t = self.transport
+        assert t is not None
+        bucket = self.result.findings
+        http = self.result.transport == "http"
+        wait = min(5.0, self.opt.timeout)
+        cases = [
+            ("server/discover", BOGUS_VERSION, UNSUPPORTED_VERSION, 400,
+             f"server/discover declaring version {BOGUS_VERSION}"),
+            (BOGUS_METHOD, None, -32601, 404, f"unknown method {BOGUS_METHOD}"),
+        ]
+        for method, version, code, status, label in cases:
+            try:
+                got = t.request(method, {}, timeout=wait, version=version)
+            except RpcError as exc:
+                problems = []
+                if exc.code != code:
+                    problems.append(f"error code {exc.code}, expected {code}")
+                elif code == UNSUPPORTED_VERSION:
+                    if not supported_from(exc.data):
+                        problems.append("error data has no `supported` version list")
+                    requested = exc.data.get("requested") if isinstance(exc.data, dict) else None
+                    if requested not in (None, version):
+                        problems.append(f"data.requested is {requested!r}, not {version!r}")
+                if http and exc.http_status != status:
+                    problems.append(f"HTTP {exc.http_status}, expected {status}")
+                if problems:
+                    self.rec.add(bucket, "error-code", f"{label}: " + "; ".join(problems))
+                continue
+            except HttpStatusError as exc:
+                self.rec.add(bucket, "error-code", f"{label}: HTTP {exc.status} with no JSON-RPC error body; "
+                                                   f"expected HTTP {status} and error {code}")
+                continue
+            except ServerExited as exc:
+                self._harvest()
+                self.rec.add(bucket, "error-code", f"{label}: {exc}; expected error {code}", detail=self._stderr(t))
+                if not self._restart(label):
+                    return
+                t = self.transport
+                assert t is not None
+                continue
+            except RequestTimeout:
+                self.rec.add(bucket, "error-code", f"{label}: no answer within {wait:g}s; expected error {code}")
+                continue
+            except TransportError as exc:
+                self.rec.add(bucket, "error-code", f"{label}: {exc}")
+                continue
+            self.rec.add(bucket, "error-code",
+                         f"{label}: the server answered with a result; expected error {code}")
 
     def _stderr(self, t: Transport) -> List[str]:
         """The last few stderr lines: for a Python traceback, that is the exception itself."""
@@ -189,6 +364,7 @@ class Prober:
     # main ---------------------------------------------------------------------
     def run(self) -> ServerResult:
         self._caps: Dict[str, Any] = {}
+        self._era: Optional[str] = None
         try:
             if not self._connect(first=True):
                 return self.result
@@ -196,8 +372,9 @@ class Prober:
             if tools is None:
                 return self.result
             if tools and "tools" not in self._caps:
+                where = "server/discover" if self._era == "modern" else "initialize"
                 self.rec.add(self.result.findings, "no-tools-capability",
-                             "tools/list returned tools, but initialize did not declare the `tools` capability")
+                             f"tools/list returned tools, but {where} did not declare the `tools` capability")
             self._check_definitions(tools)
             self._call_all(tools)
         finally:
@@ -228,6 +405,8 @@ class Prober:
             if not isinstance(page, dict) or not isinstance(page.get("tools"), list):
                 self.rec.add(bucket, "tools-list-error", "tools/list result has no `tools` array")
                 return None
+            if self._era == "modern":
+                self._check_modern_result("tools/list", page, bucket, cacheable=True)
             for item in page["tools"]:
                 if isinstance(item, dict):
                     tools.append(item)
@@ -403,6 +582,14 @@ class Prober:
                 self.rec.add(tr.findings, "call-rpc-error", str(exc), tr.name)
                 continue
             total += _ms(start)
+            if self._era == "modern":
+                self._check_modern_result("tools/call", result, tr.findings, tool=tr.name)
+                if isinstance(result, dict) and result.get("resultType") == "input_required":
+                    self.rec.add(tr.findings, "input-required",
+                                 "the tool asked the client for more input (resultType input_required); "
+                                 "the probe does not answer input requests", tr.name)
+                    self._blame_noise(tr, noise_before)
+                    continue
             self._check_result(tool, tr, result)
             self._blame_noise(tr, noise_before)
         tr.duration_ms = total
@@ -430,7 +617,8 @@ class Prober:
         try:
             if rid is not None:
                 t.notify("notifications/cancelled", {"requestId": rid, "reason": "amagi-mcp-probe timeout"})
-            t.request("ping", {}, timeout=min(5.0, self.opt.timeout))
+            # modern servers have no ping; server/discover is the cheap request they all answer
+            t.request("server/discover" if t.era == "modern" else "ping", {}, timeout=min(5.0, self.opt.timeout))
             return True
         except (TransportError, RpcError):
             return self._restart(name)
