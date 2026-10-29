@@ -246,7 +246,8 @@ class StdioTransport(Transport):
         except OSError as exc:
             raise TransportError(f"could not start server: {exc}") from exc
         threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
 
     def _read_stdout(self) -> None:
         assert self.proc and self.proc.stdout
@@ -282,6 +283,11 @@ class StdioTransport(Transport):
             pass
 
     def stderr_tail(self, lines: int = 20) -> List[str]:
+        # stdout can close before the stderr reader has the traceback: give it a moment, once
+        thread = getattr(self, "_stderr_thread", None)
+        if thread is not None and self.proc is not None and self.proc.poll() is not None:
+            thread.join(2)
+            self._stderr_thread = None
         return list(self._stderr)[-lines:]
 
     def alive(self) -> bool:

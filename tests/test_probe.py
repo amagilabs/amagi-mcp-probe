@@ -175,7 +175,7 @@ def test_shorten_paths():
 
 
 def test_crash_detail_has_no_absolute_paths(buggy_cmd):
-    r = run(buggy_cmd, timeout=1.5, only=["resize_image"])
+    r = run(buggy_cmd, timeout=10, only=["resize_image"])  # it crashes; no timeout needed
     detail = next(t for t in r.tools if t.name == "resize_image").findings[0].detail
     assert any("buggy_server.py" in line for line in detail)
     assert not any(os.getcwd().lower() in line.lower() for line in detail)
